@@ -80,8 +80,8 @@ def combine_texts(crawl_links):
 
 # Load environment variables from a .env file
 load_dotenv()
-serper_api_key = os.getenv('SERPER_API_KEY')
-openai_api_key = os.getenv('OPENAI_API_KEY')
+serper_api_key = st.secrets["api_keys"]['SERPER_API_KEY']
+openai_api_key = st.secrets["api_keys"]['OPENAI_API_KEY']
 
 # Add a text input for the celebrity name
 celebrity_name = st.text_input("Enter celebrity name:", "")
