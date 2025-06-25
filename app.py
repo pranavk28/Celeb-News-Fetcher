@@ -1,24 +1,10 @@
+import os
+from serpapi.google_search import GoogleSearch
+from dotenv import load_dotenv
+from openai import OpenAI
+from bs4 import BeautifulSoup
 import requests
 import json
-from dotenv import load_dotenv
-import os
-from bs4 import BeautifulSoup
-from openai import OpenAI
-import streamlit as st
-
-def query_serper(query, api_key):
-    url = "https://google.serper.dev/news"
-    payload = json.dumps({
-    "q": query
-    })
-    headers = {
-    'X-API-KEY': serper_api_key,
-    'Content-Type': 'application/json'
-    }
-
-    response = json.loads(requests.request("POST", url, headers=headers, data=payload).text)
-    return response
-
 
 def crawl_text(url):
     """
@@ -64,53 +50,106 @@ def crawl_text(url):
     except Exception as e:
         error_msg = f"An error occurred while parsing the page: {str(e)}"
         return False, error_msg
+
+def _llm_summarize(query: str, full_text: str) -> str:
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    client = OpenAI(api_key=openai_api_key)
+    completion = client.chat.completions.create(
+        model= 'gpt-4o-mini',
+        messages=[
+            {"role": "system", "content": "You are  assistant summarizing information on a personality from given scraped text for top news about celebrity as context. Summarize to 3 paragraph articles."},
+            {"role": "user", "content":  f"""Answer the following question based on this context primarily:
+
+                    {full_text}
+
+                    Question: Summarize the latest news about {query} 
+                    """
+                }
+        ]
+    )
+    return completion.choices[0].message.content
+
+def fetch_and_summarize(
+    name: str,
+    date_value: int | None = None,
+    date_unit: str | None = None
+) -> str:
+    """
+    Fetch latest news on `name`, limited to `count` items.
+    Optionally filter to the last `date_value` `date_unit`(s)
+    (where unit is 'day', 'week', or 'month').
+    """
+    api_key = os.getenv("SERPAPI_KEY")
+    if not api_key:
+        return "Missing SERPAPI_API_KEY environment variable."
     
-def combine_texts(crawl_links):
-    count = 0
+    # Build base params
+    params: dict[str, str | int] = {
+        "engine": "google",
+        "q": name,
+        "tbm": "nws",
+        "api_key": os.getenv("SERPAPI_KEY")
+    }
+
+    # Only add as_qdr if both date_value and date_unit are provided
+    if date_value is not None or date_unit is not None:
+        if date_value is None or date_unit is None:
+            return "To filter by date, provide both date_value and date_unit."
+        unit_map = {"day": "d", "week": "w", "month": "m"}
+        short = unit_map.get(date_unit.lower())
+        if not short:
+            return f"Unsupported date_unit '{date_unit}'. Choose day, week, or month."
+        params["as_qdr"] = f"{short}{date_value}"
+    
+    # Fetch from SerpAPI
+    try:
+        search = GoogleSearch(params)
+        data = search.get_dict()
+    except Exception as e:
+        print(f"Failed to fetch news or an unexpected error occurred: {e}")
+
+    # Handle API-level errors or no results
+    if "error" in data:
+        msg = data.get("error")
+        detail = data.get("error_details") or ""
+        return f"SerpAPI returned an error: {msg}. {detail}"
+    print(data)
+    results = data["news_results"]
+    if not results:
+        return f"No recent news found for '{name}'."
+
+    # Prepare items for LLM
+    items = [
+        {
+            "title": itm.get("title", "No title"),
+            "snippet": itm.get("snippet", "No snippet available."),
+            "date": itm.get("date", "Unknown date"),
+            "link": itm.get("link")
+        }
+        for itm in results
+    ]
+    
+    crawls_links = [link['link'] for link in items]
+    
+    i = 1
     full_text = ''
-    for link in crawl_links:
+    for link in crawls_links:
         success,text = crawl_text(link)
         if success and text != '':
-            count += 1
+            i += 1
             full_text += f'Text {count}\n' + text + '\n'
-        if count == 5:
+        if i == count:
             break
-    return full_text
-    
 
-# Load environment variables from a .env file
-load_dotenv()
-serper_api_key = st.secrets["api_keys"]['SERPER_API_KEY']
-openai_api_key = st.secrets["api_keys"]['OPENAI_API_KEY']
-
-# Add a text input for the celebrity name
-celebrity_name = st.text_input("Enter celebrity name:", "")
-if st.button("Search") and celebrity_name:
-    # Show a loading spinner while getting the information
-    with st.spinner(f"Searching for information about {celebrity_name}..."):
-        response = query_serper(celebrity_name,serper_api_key)
-        crawl_links = [link['link'] for link in response['news']]
-        context = combine_texts(crawl_links)
-
-        client = OpenAI(api_key=openai_api_key)
-        completion = client.chat.completions.create(
-            model= 'gpt-4o-mini',
-            messages=[
-                {"role": "system", "content": "You are  assistant summarizing information on a personality from given scraped text for top news about celebrity as context. Summarize to 3 paragraph articles."},
-                {"role": "user", "content":  f"""Answer the following question based on this context primarily:
-
-                        {context}
-
-                        Question: Summarize the latest news about {celebrity_name} 
-                        """
-                    }
-            ]
+    # Summarize with LLM (fallback to bullets on error)
+    try:
+        return _llm_summarize(name, full_text)
+    except Exception as e:
+        bullets = "\n".join(
+            f"{i+1}. {it['title']} ({it['date']})\n   {it['snippet']}"
+            for i, it in enumerate(items)
         )
-        bot_reply = completion.choices[0].message.content
-        st.markdown(bot_reply)
-else:
-    # Show a placeholder message
-    st.write("Enter a celebrity's name and click 'Search' to get information!")
-
-
-
+        return (
+            f"Summary generation failed: {e}\n\n"
+            f"Here are the raw top {len(items)} items:\n\n{bullets}"
+        )
