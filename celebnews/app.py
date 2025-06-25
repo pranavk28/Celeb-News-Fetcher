@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from bs4 import BeautifulSoup
 import requests
-import json
 
 def crawl_text(url):
     """
